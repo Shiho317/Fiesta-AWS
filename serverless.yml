@@ -1,27 +1,83 @@
 org: shiho03
 app: fiesta-email-service
 service: fiesta-email-service
-frameworkVersion: '3'
+frameworkVersion: "3"
+useDotenv: true
 
 provider:
   name: aws
   runtime: nodejs18.x
-
-constructs:
-  jobs:
-    type: queue
-    worker:
-      handler: index.consumer
+  environment:
+    EMAIL_SERVER: ${env:EMAIL_SERVER}
+  iam:
+    role:
+      name: email-service-${sls:stage}-role
+      statements:
+        - Effect: Allow
+          Resource: "*"
+          Action:
+            - sqs:SendMessage
+            - sqs:DeleteMessage
+            - sqs:ReceiveMessage
+            - sqs:GetQueueAttributes
+            - logs:PutLogEvent
+            - logs:CreateLogStream
+            - logs:CreateLogGroup
+            - lambda:InvokeFunction
+            - states:*
 
 functions:
-  producer:
-    handler: index.producer
+  scheduler:
+    handler: index.scheduler
     events:
       - httpApi:
           method: post
-          path: /produce
+          path: /schedule
     environment:
-      QUEUE_URL: ${construct:jobs.queueUrl}
+      STATE_MACHINE_ARN: ${self:resources.Outputs.EmailStateMachine.Value}
+  producer:
+    handler: index.producer
+    environment:
+      QUEUE_URL: { Ref: EmailQueue }
+  consumer:
+    handler: index.consumer
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt:
+              - EmailQueue
+              - Arn
+
+stepFunctions:
+  stateMachines:
+    sendEmail:
+      name: EmailScheduling
+      definition:
+        Comment: "Schedules an email"
+        StartAt: WaitForTimestamp
+        States:
+          WaitForTimestamp:
+            Type: Wait
+            TimestampPath: $.sendAt
+            Next: PushEmail
+          PushEmail:
+            Type: Task
+            Resource: !GetAtt ProducerLambdaFunction.Arn
+            End: true
+
+resources:
+  Resources:
+    EmailQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: "EmailQueue"
+  Outputs:
+    EmailStateMachine:
+      Description: ARN for Email State Machine
+      Value:
+        Ref: EmailScheduling
 
 plugins:
-  - serverless-lift
+  - serverless-step-functions
+  - serverless-offline
+  - serverless-plugin-typescript
